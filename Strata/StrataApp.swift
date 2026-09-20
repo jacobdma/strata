@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct StrataApp: App {
+    @State private var store = WorkspaceStore()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(store: store)
         }
     }
 }

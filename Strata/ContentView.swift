@@ -1,211 +1,84 @@
 import SwiftUI
-import PencilKit
-
-@Observable
-private final class Sketch: Identifiable {
-    let id = UUID()
-    let title: String
-    var layers = (1...3).map { _ in DrawingLayer() }
-    var selectedLayer = 1
-
-    init(title: String) { self.title = title }
-    var active: DrawingLayer { layers[selectedLayer] }
-}
-
-private final class InkCanvas: PKCanvasView {
-    private let history = UndoManager()
-    override var undoManager: UndoManager? { history }
-}
-
-private final class DrawingLayer: Identifiable {
-    let id = UUID()
-    let canvas = InkCanvas()
-
-    init() {
-        canvas.backgroundColor = .clear
-        canvas.isOpaque = false
-        canvas.drawingPolicy = .anyInput
-        canvas.isScrollEnabled = false
-        canvas.tool = PKInkingTool(.pen, color: .black, width: 2)
-    }
-}
 
 struct ContentView: View {
-    @State private var sketches = [Sketch(title: "Ground floor")]
-    @State private var selectedID: UUID?
-    @State private var showGrid = true
-    private let accent = Color(red: 0.24, green: 0.36, blue: 0.31)
-
-    private var sketch: Sketch {
-        sketches.first { $0.id == selectedID } ?? sketches[0]
-    }
+    let store: WorkspaceStore
+    @State private var session = CanvasSession()
+    @State private var columns: NavigationSplitViewVisibility = .detailOnly
+    @State private var compactColumn: NavigationSplitViewColumn = .detail
+    @State private var toolsExpanded = true
+    @State private var drawingsOpen = false
+    @State private var showStorageError = false
+    @AppStorage("showGrid") private var showGrid = true
+    @AppStorage("layerHaptics") private var haptics = true
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedID) {
-                Section("Drawings") {
-                    ForEach(sketches) { item in
-                        Label(item.title, systemImage: "doc")
-                            .padding(.vertical, 6)
-                            .tag(item.id)
-                    }
-                }
+        NavigationSplitView(columnVisibility: $columns, preferredCompactColumn: $compactColumn) {
+            WorkspaceSidebar(store: store) {
+                columns = .detailOnly
+                compactColumn = .detail
             }
-            .navigationTitle("Strata")
-            .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
-            .safeAreaInset(edge: .bottom) {
-                Button(action: addSketch) {
-                    Label("New drawing", systemImage: "plus")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(20)
-                }
-                .buttonStyle(.plain)
-            }
+                .disabled(store.loadFailed)
         } detail: {
-            VStack(spacing: 0) {
-                drawingToolbar
-                Divider()
-                HStack(spacing: 16) {
-                    ZStack {
-                        Color.white
-                        if showGrid { dotGrid }
-                        ForEach(sketch.layers) { layer in
-                            DrawingCanvas(layer: layer, active: layer.id == sketch.active.id)
-                                .allowsHitTesting(layer.id == sketch.active.id)
+            GeometryReader { geometry in
+                DrawingSurface(store: store, session: session, showGrid: showGrid)
+                    .ignoresSafeArea(edges: .bottom)
+                    .overlay(alignment: .topLeading) {
+                        HStack(spacing: 2) {
+                            ToolButton(title: "Show projects", icon: "sidebar.left") {
+                                columns = columns == .detailOnly ? .all : .detailOnly
+                                compactColumn = columns == .detailOnly ? .detail : .sidebar
+                            }
+                            .accessibilityIdentifier("projectsToggle")
+                            ToolButton(title: "Drawings in \(store.project.name)", icon: "doc.on.doc") {
+                                drawingsOpen = true
+                            }
+                            .accessibilityIdentifier("drawingsToggle")
+                            .popover(isPresented: $drawingsOpen) { ProjectDrawings(store: store) }
+                        }
+                        .padding(5)
+                        .modifier(FloatingSurface())
+                        .padding(16)
+                    }
+                    .overlay(alignment: .top) {
+                        DrawingTools(store: store, session: session, expanded: $toolsExpanded, showGrid: $showGrid)
+                            .padding(.top, geometry.size.width < 520 ? 80 : 16)
+                    }
+                    .overlay(alignment: .trailing) {
+                        LayerControls(store: store, haptics: haptics,
+                                      maximumVisibleLayers: max(1, min(5, Int((geometry.size.height - 300) / 44))))
+                            .padding(.trailing, 16)
+                            .offset(y: geometry.size.width < 520 ? 50 : 0)
+                    }
+                    .overlay(alignment: .bottomLeading) {
+                        if store.storageError != nil {
+                            Button { showStorageError = true } label: {
+                                Label(store.loadFailed ? "Saved workspace unavailable" : "Changes are not saved",
+                                      systemImage: "exclamationmark.triangle")
+                                    .font(.caption).padding(12)
+                                    .background(.regularMaterial, in: Capsule())
+                            }
+                            .padding()
                         }
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(.black.opacity(0.06)))
-                    .shadow(color: .black.opacity(0.04), radius: 12, y: 4)
-                    .accessibilityLabel("Drawing canvas")
-                    layerRail
-                }
-                .padding(24)
-                HStack {
-                    Text("SKETCH / \(sketch.title.uppercased())")
-                        .tracking(1.5)
-                    Spacer()
-                    Text("Apple Pencil or touch")
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 24)
-                .padding(.bottom, 16)
+                    .disabled(store.loadFailed)
             }
-            .background(Color(red: 0.95, green: 0.95, blue: 0.93))
-            .navigationTitle(sketch.title)
-            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .navigationBar)
         }
-        .tint(accent)
+        .navigationSplitViewStyle(.balanced)
+        .tint(.sage)
         .preferredColorScheme(.light)
-        .onAppear { if selectedID == nil { selectedID = sketches[0].id } }
-    }
-
-    private var drawingToolbar: some View {
-        HStack(spacing: 8) {
-            Label("Pen", systemImage: "pencil.tip")
-                .font(.subheadline.weight(.medium))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(accent.opacity(0.1), in: Capsule())
-            Circle().fill(.black).frame(width: 10, height: 10).padding(.leading, 8)
-            Text("2 pt").font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            tool("Undo", icon: "arrow.uturn.backward") { sketch.active.canvas.undoManager?.undo() }
-            tool("Redo", icon: "arrow.uturn.forward") { sketch.active.canvas.undoManager?.redo() }
-            Divider().frame(height: 20).padding(.horizontal, 8)
-            tool("Toggle grid", icon: showGrid ? "circle.grid.3x3.fill" : "circle.grid.3x3") {
-                showGrid.toggle()
-            }
-            .accessibilityValue(showGrid ? "On" : "Off")
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: toolsExpanded)
+        .onChange(of: scenePhase) { _, phase in if phase != .active { store.save() } }
+        .onChange(of: store.storageError, initial: true) { _, error in showStorageError = error != nil }
+        .alert("Workspace storage", isPresented: $showStorageError) {
+            Button("Retry") { if store.loadFailed { store.load() } else { store.save() } }
+            Button("Close", role: .cancel) {}
+        } message: {
+            Text(store.storageError ?? "")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .background(.white.opacity(0.8))
-    }
-
-    private var layerRail: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "square.3.layers.3d")
-                .foregroundStyle(accent)
-                .accessibilityHidden(true)
-            Text("LAYERS").font(.system(size: 9, weight: .semibold)).tracking(1)
-                .foregroundStyle(.secondary)
-            VStack(spacing: 0) {
-                ForEach(sketch.layers.indices.reversed(), id: \.self) { index in
-                    Button { sketch.selectedLayer = index } label: {
-                        Capsule()
-                            .fill(index == sketch.selectedLayer ? accent : accent.opacity(0.2))
-                            .frame(width: index == sketch.selectedLayer ? 28 : 16, height: 6)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Layer \(index + 1)")
-                    .accessibilityAddTraits(index == sketch.selectedLayer ? .isSelected : [])
-                }
-            }
-            .background(.white, in: Capsule())
-            .overlay(Capsule().stroke(accent.opacity(0.1)))
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                let row = min(sketch.layers.count - 1, max(0, Int(value.location.y / 44)))
-                sketch.selectedLayer = sketch.layers.count - 1 - row
-            })
-            .accessibilityHint("Slide vertically to switch layers")
-            Text(String(format: "%02d", sketch.selectedLayer + 1))
-                .font(.system(.caption, design: .monospaced).weight(.medium))
-                .foregroundStyle(accent)
-            tool("Add layer", icon: "plus") {
-                sketch.layers.append(DrawingLayer())
-                sketch.selectedLayer = sketch.layers.count - 1
-            }
-            .disabled(sketch.layers.count >= 8)
-            .help("Add a layer (up to 8 per drawing)")
-        }
-        .frame(width: 52)
-        .frame(maxHeight: .infinity)
-        .animation(.easeOut(duration: 0.12), value: sketch.selectedLayer)
-    }
-
-    private var dotGrid: some View {
-        Canvas { context, size in
-            var dots = Path()
-            for x in stride(from: 24.0, to: size.width, by: 24) {
-                for y in stride(from: 24.0, to: size.height, by: 24) {
-                    dots.addEllipse(in: CGRect(x: x, y: y, width: 1, height: 1))
-                }
-            }
-            context.fill(dots, with: .color(.black.opacity(0.15)))
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-
-    private func tool(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon).frame(width: 44, height: 44)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .help(title)
-    }
-
-    private func addSketch() {
-        let newSketch = Sketch(title: "Drawing \(sketches.count + 1)")
-        sketches.append(newSketch)
-        selectedID = newSketch.id
     }
 }
 
-private struct DrawingCanvas: UIViewRepresentable {
-    let layer: DrawingLayer
-    let active: Bool
-
-    func makeUIView(context: Context) -> PKCanvasView { layer.canvas }
-
-    func updateUIView(_ canvas: PKCanvasView, context: Context) {
-        canvas.isUserInteractionEnabled = active
-    }
-}
-
-#Preview { ContentView() }
+#Preview { ContentView(store: WorkspaceStore(url: URL.temporaryDirectory.appending(path: "Strata-preview.strata"))) }
